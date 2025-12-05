@@ -1,11 +1,13 @@
+
 """
 Usage:
-python eval_dummy.py --checkpoint data/outputs/2025.12.01/23.04.52_train_franka_cup_cup_image/checkpoints/latest.ckpt
+python eval_dummy.py --checkpoint data/outputs/2025.12.03/latest.ckpt
 """
 
 import sys
 import os
 import click
+import time
 import hydra
 import torch
 import dill
@@ -40,6 +42,8 @@ def main(checkpoint, device):
     device = torch.device(device)
     policy.to(device)
     policy.eval()
+
+    policy.num_inference_steps = 8
     
     # 4. Generate Dummy Data (Based on Config Shapes)
     # We look at the config stored INSIDE the checkpoint to know what shapes to create.
@@ -55,6 +59,8 @@ def main(checkpoint, device):
         # Shape from config is [C, H, W] or [D]
         # Policy expects [Batch, Time, ...] -> [1, 2, ...]
         raw_shape = tuple(attr.shape)
+        print("shape")
+        print(raw_shape)
         input_shape = (batch_size, n_obs_steps) + raw_shape
         
         print(f"Creating dummy input for '{key}': {input_shape}")
@@ -70,11 +76,14 @@ def main(checkpoint, device):
 
     # 5. Run Inference
     print("\n--- Running Inference ---")
+    # while(True):
     with torch.no_grad():
         # This runs the full Denoising Loop (e.g., 8 steps)
+        start_time = time.time()
         result = policy.predict_action(obs_dict)
+        print(time.time() - start_time)
         
-    # 6. Print Results
+    # # 6. Print Results
     action = result['action'] # Shape: [Batch, Horizon, Action_Dim]
     action_np = action.detach().cpu().numpy()
     
