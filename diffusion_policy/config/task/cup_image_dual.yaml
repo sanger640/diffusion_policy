@@ -1,0 +1,45 @@
+name: cup_image_dual
+
+# --- 1. Shapes & Dimensions ---
+image_shape: [3, 240, 320]
+action_dim: 4 # 3 pos + 6 rot + 1 grip
+dataset_path: "${hydra:runtime.cwd}/data/paper_implementation.zarr"
+
+shape_meta: &shape_meta
+  obs:
+    camera_1:
+      shape: ${task.image_shape}
+      type: rgb
+    camera_2:
+      shape: ${task.image_shape}
+      type: rgb
+    agent_pos:
+      shape: 
+        - ${task.action_dim}
+      type: low_dim
+  action:
+    shape: 
+      - ${task.action_dim}
+
+# --- 2. Environment Runner (Dummy) ---
+# Since we don't have a sim/robot connected, we use the DummyRunner
+# to satisfy the API requirements without crashing.
+env_runner:
+  _target_: diffusion_policy.env_runner.dummy_runner.DummyRunner
+  n_train: 0
+  n_test: 0
+
+# --- 3. Dataset (Your Custom Class) ---
+dataset:
+  _target_: diffusion_policy.dataset.cup_dual_dataset.CupDataset
+  dataset_path: ${task.dataset_path}
+  shape_meta: *shape_meta
+  
+  # Horizon & Padding logic handled by the main config interpolation
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  
+  seed: 42
+  val_ratio: 0.05
+  max_train_episodes: null
