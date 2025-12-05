@@ -72,63 +72,115 @@ class CupDataset(BaseImageDataset):
         )
         val_set.train_mask = ~self.train_mask
         return val_set
-
+    
     def get_normalizer(self, mode='limits', **kwargs):
         normalizer = LinearNormalizer()
         
-        data = {
-            'action': self.replay_buffer['action'],
-            'agent_pos': self.replay_buffer['obs/agent_pos']
-        }
+        # Load raw data
+        raw_action = self.replay_buffer['action'][:]
+        raw_pos = self.replay_buffer['obs/agent_pos'][:]
         
-        # Fit standard normalizer first
+        # --- FIX: Slice to 4D (Pos + Grip) ---
+        # Keep indices 0,1,2 (XYZ) and 9 (Grip). Drop 3-8 (Rot).
+        action_4d = np.concatenate([raw_action[:, :3], raw_action[:, 9:]], axis=-1)
+        
+        # Do the same for state if you want 4D inputs too (Recommended)
+        pos_4d = np.concatenate([raw_pos[:, :3], raw_pos[:, 9:]], axis=-1)
+        
+        data = {
+            'action': action_4d,
+            'agent_pos': pos_4d
+        }
+        # -------------------------------------
+        
+        # Fit normalizer on the new 4D data
         normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
         
-        # --- CUSTOM ROTATION HANDLING ---
-        for key in ['action', 'agent_pos']:
-            # 1. Get parameters from the fitted normalizer
-            params = normalizer[key].params_dict
-            
-            # 2. Disable normalization for Rot6D (indices 3-8)
-            params['scale'][3:9] = 1.0
-            params['offset'][3:9] = 0.0
-            
-            # 3. Create manual normalizer
-            # FIX: Use .get_input_stats() instead of .input_stats
-            normalizer[key] = SingleFieldLinearNormalizer.create_manual(
-                scale=params['scale'],
-                offset=params['offset'],
-                input_stats_dict=normalizer[key].get_input_stats() # <--- FIXED
-            )
-            
+        # Create image normalizer
         normalizer['agent_view_image'] = get_image_range_normalizer()
         return normalizer
+    # def get_normalizer(self, mode='limits', **kwargs):
+    #     normalizer = LinearNormalizer()
+        
+    #     data = {
+    #         'action': self.replay_buffer['action'],
+    #         'agent_pos': self.replay_buffer['obs/agent_pos']
+    #     }
+        
+    #     # Fit standard normalizer first
+    #     normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
+        
+    #     # --- CUSTOM ROTATION HANDLING ---
+    #     for key in ['action', 'agent_pos']:
+    #         # 1. Get parameters from the fitted normalizer
+    #         params = normalizer[key].params_dict
+            
+    #         # 2. Disable normalization for Rot6D (indices 3-8)
+    #         params['scale'][3:9] = 1.0
+    #         params['offset'][3:9] = 0.0
+            
+    #         # 3. Create manual normalizer
+    #         # FIX: Use .get_input_stats() instead of .input_stats
+    #         normalizer[key] = SingleFieldLinearNormalizer.create_manual(
+    #             scale=params['scale'],
+    #             offset=params['offset'],
+    #             input_stats_dict=normalizer[key].get_input_stats() # <--- FIXED
+    #         )
+            
+    #     normalizer['agent_view_image'] = get_image_range_normalizer()
+    #     return normalizer
 
     def __len__(self) -> int:
         return len(self.sampler)
-
+    
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sample = self.sampler.sample_sequence(idx)
         
-        # 1. Process Image
-        # Format: (T, H, W, C) -> (T, C, H, W)
+        # Image
         image = sample['obs/agent_view_image']
-        # image = np.moveaxis(image, -1, 1)
-        # Convert uint8 (0-255) to float32 (0-1)
+        # image = np.moveaxis(image, -1, 1).astype(np.float32) / 255.0
         image = image.astype(np.float32) / 255.0
         
-        # 2. Process State & Action
-        agent_pos = sample['obs/agent_pos'].astype(np.float32)
-        action = sample['action'].astype(np.float32)
+        # Raw 10D Data
+        raw_pos = sample['obs/agent_pos'].astype(np.float32)
+        raw_action = sample['action'].astype(np.float32)
+
+        # --- FIX: Slice to 4D ---
+        # Input: (T, 10) -> Output: (T, 4)
+        pos_4d = np.concatenate([raw_pos[:, :3], raw_pos[:, 9:]], axis=-1)
+        action_4d = np.concatenate([raw_action[:, :3], raw_action[:, 9:]], axis=-1)
+        # ------------------------
 
         data = {
             'obs': {
-                'agent_view_image': image, # Shape: [T, 3, 240, 320]
-                'agent_pos': agent_pos,    # Shape: [T, 10]
+                'agent_view_image': image,
+                'agent_pos': pos_4d, # Now 4D
             },
-            'action': action               # Shape: [T, 10]
+            'action': action_4d      # Now 4D
         }
         return dict_apply(data, torch.from_numpy)
+    # def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    #     sample = self.sampler.sample_sequence(idx)
+        
+    #     # 1. Process Image
+    #     # Format: (T, H, W, C) -> (T, C, H, W)
+    #     image = sample['obs/agent_view_image']
+    #     # image = np.moveaxis(image, -1, 1)
+    #     # Convert uint8 (0-255) to float32 (0-1)
+    #     image = image.astype(np.float32) / 255.0
+        
+    #     # 2. Process State & Action
+    #     agent_pos = sample['obs/agent_pos'].astype(np.float32)
+    #     action = sample['action'].astype(np.float32)
+
+    #     data = {
+    #         'obs': {
+    #             'agent_view_image': image, # Shape: [T, 3, 240, 320]
+    #             'agent_pos': agent_pos,    # Shape: [T, 10]
+    #         },
+    #         'action': action               # Shape: [T, 10]
+    #     }
+    #     return dict_apply(data, torch.from_numpy)
     
 def test():
     import os

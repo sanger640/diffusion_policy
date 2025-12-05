@@ -2,7 +2,7 @@ name: cup_image
 
 # --- 1. Shapes & Dimensions ---
 image_shape: [3, 240, 320]
-action_dim: 10 # 3 pos + 6 rot + 1 grip
+action_dim: 4 # 3 pos + 6 rot + 1 grip
 dataset_path: "${hydra:runtime.cwd}/data/paper_implementation.zarr"
 
 shape_meta: &shape_meta
@@ -11,10 +11,10 @@ shape_meta: &shape_meta
       shape: ${task.image_shape}
       type: rgb
     agent_pos:
-      shape: [10]
+      shape: [4]
       type: low_dim
   action:
-    shape: [10]
+    shape: [4]
 
 # --- 2. Environment Runner (Dummy) ---
 # Since we don't have a sim/robot connected, we use the DummyRunner

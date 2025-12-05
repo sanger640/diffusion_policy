@@ -78,14 +78,14 @@ ema:
 
 dataloader:
   batch_size: 64 #64 works too (idk if it crashes yet), 48 works best so far
-  num_workers: 2 # 2 stable and fast, what about 1: works>
+  num_workers: 8 # 2 stable and fast, what about 1: works>
   shuffle: True
   pin_memory: True
   persistent_workers: True
 
 val_dataloader:
-  batch_size: 32
-  num_workers: 1
+  batch_size: 64
+  num_workers: 8
   shuffle: False
   pin_memory: True
   persistent_workers: True
@@ -102,14 +102,14 @@ training:
   resume: True
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  num_epochs: 100
+  num_epochs: 600
   gradient_accumulate_every: 1
   freeze_encoder: False
   use_ema: True
   rollout_every: 50
-  checkpoint_every: 5
+  checkpoint_every: 50
   val_every: 50
-  sample_every: 5
+  sample_every: 50
   max_train_steps: null
   max_val_steps: null
   tqdm_interval_sec: 1.0
@@ -140,7 +140,8 @@ hydra:
   job:
     override_dirname: ${name}
   run:
-    dir: data/outputs/2025.12.01/23.04.52_train_franka_cup_cup_image
+    # dir: data/outputs/2025.12.01/23.04.52_train_franka_cup_cup_image
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
   sweep:
     dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
     subdir: ${hydra.job.num}
