@@ -9,8 +9,10 @@ from scipy.spatial.transform import Rotation as R
 from numcodecs import Blosc
 
 # --- CONFIGURATION ---
-DATA_ROOT = "/media/corey/New Volume/diffusion_policy/tasks/pick_place/dual_cam/episodes"  # Your data folder
-OUTPUT_ZARR = "data/paper_implementation.zarr"
+# DATA_ROOT = "/media/corey/New Volume/diffusion_policy/tasks/pick_place/dual_cam/episodes"  # Your data folder
+DATA_ROOT = "/mnt/ssd_data/tasks/jenga_mujoco/episodes"
+
+OUTPUT_ZARR = "data/jenga_muj_imp.zarr"
 RESIZE_W, RESIZE_H = 320, 240 # Resolution matches your training config
 
 def quat_to_rot6d(quat_list):

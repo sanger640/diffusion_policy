@@ -3,7 +3,7 @@ name: cup_image_dual
 # --- 1. Shapes & Dimensions ---
 image_shape: [3, 240, 320]
 action_dim: 4 # 3 pos + 6 rot + 1 grip
-dataset_path: "${hydra:runtime.cwd}/data/paper_implementation.zarr"
+dataset_path: "${hydra:runtime.cwd}/data/jenga_muj_imp.zarr"
 
 shape_meta: &shape_meta
   obs:

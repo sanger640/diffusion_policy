@@ -115,7 +115,7 @@ training:
   tqdm_interval_sec: 1.0
 
 logging:
-  project: diffusion_policy_franka_dual_cam
+  project: diffusion_policy_franka_jenga_dual
   resume: True
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
