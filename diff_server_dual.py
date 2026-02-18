@@ -8,7 +8,7 @@ import time
 from omegaconf import OmegaConf
  
 # --- CONFIG ---
-CHECKPOINT_PATH = "data/outputs/2025.12.03/latest.ckpt"
+CHECKPOINT_PATH = "data/outputs/latest.ckpt"
 PORT = 5555
 # --------------
  
@@ -30,7 +30,7 @@ def main(cfg: OmegaConf):
     device = torch.device('cuda')
     policy.to(device)
     policy.eval()
-    policy.num_inference_steps = 10
+    policy.num_inference_steps = 8
 
     print("✅ Model Loaded. Starting Network Server...")
  
@@ -44,8 +44,9 @@ def main(cfg: OmegaConf):
     while True:
         # A. Wait for Request (Blocking)
         # We expect a dictionary: {'img': bytes, 'state': bytes, 'shape': tuple}
+        print("waiting chief!")
         message = socket.recv_pyobj()
-        # print("recived")
+        print("recived")
         start_time = time.time()
 
         # B. Unpack Data
