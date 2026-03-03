@@ -4,6 +4,7 @@ import torch
 import cv2
 import numpy as np
 import hydra
+import time
 from omegaconf import OmegaConf
 import pathlib
 from diffusion_policy.common.pytorch_util import dict_apply
@@ -66,19 +67,22 @@ def main(cfg: OmegaConf):
 
     # 5. Run Inference
     print("Running Inference...")
-    with torch.no_grad():
-        # The policy takes dictionary input and returns dictionary output
-        result = policy.predict_action(obs_dict)
+    while(True):
+        with torch.no_grad():
+            # The policy takes dictionary input and returns dictionary output
+            start_time = time.time()
+            result = policy.predict_action(obs_dict)
+            print(start_time - time.time())
+            
+        # 6. Extract Action
+        # The result is (B, Horizon, Action_Dim) -> e.g., (1, 16, 10)
+        action_sequence = result['action'][0].cpu().numpy()
         
-    # 6. Extract Action
-    # The result is (B, Horizon, Action_Dim) -> e.g., (1, 16, 10)
-    action_sequence = result['action'][0].cpu().numpy()
-    
-    print("\n--- Inference Result ---")
-    print(f"Input Image Shape: {dummy_img.shape}")
-    print(f"Predicted Trajectory Shape: {action_sequence.shape}")
-    print("First 3 predicted steps (Position [x,y,z]):")
-    print(action_sequence[:3, :3]) # Print first 3 steps, XYZ only
+        # print("\n--- Inference Result ---")
+        # print(f"Input Image Shape: {dummy_img.shape}")
+        # print(f"Predicted Trajectory Shape: {action_sequence.shape}")
+        # print("First 3 predicted steps (Position [x,y,z]):")
+        print(action_sequence[:3, :3]) # Print first 3 steps, XYZ only
 
 if __name__ == "__main__":
     main()

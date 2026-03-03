@@ -31,7 +31,7 @@ env_runner:
 
 # --- 3. Dataset (Your Custom Class) ---
 dataset:
-  _target_: diffusion_policy.dataset.cup_dual_dataset.CupDataset
+  _target_: diffusion_policy.dataset.cup_dual_dataset_proc.CupDualDataset
   dataset_path: ${task.dataset_path}
   shape_meta: *shape_meta
   
