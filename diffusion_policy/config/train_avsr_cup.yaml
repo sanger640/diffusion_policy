@@ -11,9 +11,9 @@ exp_name: "default"
 
 # --- Horizons ---
 # 10 Hz trajectory recording (record_hz in teleop_config.yaml).
-# horizon=16 covers 1.6 s; 2 obs steps → policy sees current + 1 past frame.
+# horizon=16 covers 1.6 s; 3 obs steps → policy sees current + 2 past frames (0.3 s context).
 horizon: 16
-n_obs_steps: 2
+n_obs_steps: 3
 n_action_steps: 8
 n_latency_steps: 0
 dataset_obs_steps: ${n_obs_steps}

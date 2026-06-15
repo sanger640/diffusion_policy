@@ -28,8 +28,15 @@ Each trajectory JSON has the structure:
     ]
   }
 
-Action space (4D): target EE position (3) + target gripper (1 float)
-Obs agent_pos (4D): actual EE position (3) + actual gripper (1 float)
+Action space  (4D): actual EE position proc_pos (3) + actual gripper (1 float).
+  Using proc_pos (FK from joint encoders) rather than the VR-commanded `position`
+  avoids injecting VR tracking noise into the action labels. During rollout the
+  policy outputs Cartesian targets which are sent directly to update_desired_ee_pose().
+
+Agent_pos (7D): actual joint angles joint_pos (6) + actual gripper (1 float).
+  Joint angles uniquely determine arm configuration; EE position alone is ambiguous
+  (multiple joint configs can reach the same Cartesian pose).
+
 Image: wrist camera resized to 240x320 (H x W), normalised to [0, 1]
 """
 
@@ -86,15 +93,17 @@ def _load_all_episodes(dataset_path: str) -> List[dict]:
         cam1_ts = np.array([int(p.stem.split("_")[1]) for p in cam1_files])
 
         N = len(waypoints)
-        actions = np.zeros((N, 4), dtype=np.float32)
-        agent_pos = np.zeros((N, 4), dtype=np.float32)
+        actions = np.zeros((N, 4), dtype=np.float32)   # proc_pos (3) + proc_gripper (1)
+        agent_pos = np.zeros((N, 7), dtype=np.float32)  # joint_pos (6) + proc_gripper (1)
         img_paths: List[str] = []
 
         for i, wp in enumerate(waypoints):
-            actions[i, :3] = wp["position"]
-            actions[i, 3] = float(wp["gripper"])
-            agent_pos[i, :3] = wp["proc_pos"]
-            agent_pos[i, 3] = float(wp["proc_gripper"])
+            # Action: actual EE pos (FK) + actual gripper — cleaner than VR-commanded target
+            actions[i, :3] = wp["proc_pos"]
+            actions[i, 3] = float(wp["proc_gripper"])
+            # State: joint angles (unique config) + gripper
+            agent_pos[i, :6] = wp["joint_pos"]
+            agent_pos[i, 6] = float(wp["proc_gripper"])
 
             # Find nearest camera frame by timestamp
             ts_ms = int(wp["timestamp"] * 1000)
@@ -128,8 +137,8 @@ class AvSRDataset(BaseImageDataset):
 
     Each sample:
       obs/camera_0  : float32 (horizon, 3, H, W)
-      obs/agent_pos : float32 (horizon, 4)
-      action        : float32 (horizon, 4)
+      obs/agent_pos : float32 (horizon, 7)   joint_pos (6) + proc_gripper (1)
+      action        : float32 (horizon, 4)   proc_pos  (3) + proc_gripper (1)
     """
 
     def __init__(
