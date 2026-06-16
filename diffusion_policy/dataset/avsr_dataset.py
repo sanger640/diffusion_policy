@@ -28,12 +28,12 @@ Each trajectory JSON has the structure:
     ]
   }
 
-Action space  (4D): actual EE position proc_pos (3) + actual gripper (1 float).
+Action space  (4D): actual EE position proc_pos (3) + commanded gripper state (1 float).
   Using proc_pos (FK from joint encoders) rather than the VR-commanded `position`
-  avoids injecting VR tracking noise into the action labels. During rollout the
-  policy outputs Cartesian targets which are sent directly to update_desired_ee_pose().
+  avoids injecting VR tracking noise into the action labels. Gripper uses the
+  commanded `gripper` field (not proc_gripper, which was not recorded correctly).
 
-Agent_pos (7D): actual joint angles joint_pos (6) + actual gripper (1 float).
+Agent_pos (7D): actual joint angles joint_pos (6) + commanded gripper state (1 float).
   Joint angles uniquely determine arm configuration; EE position alone is ambiguous
   (multiple joint configs can reach the same Cartesian pose).
 
@@ -98,12 +98,12 @@ def _load_all_episodes(dataset_path: str) -> List[dict]:
         img_paths: List[str] = []
 
         for i, wp in enumerate(waypoints):
-            # Action: actual EE pos (FK) + actual gripper — cleaner than VR-commanded target
+            # Action: actual EE pos (FK) + commanded gripper state
             actions[i, :3] = wp["proc_pos"]
-            actions[i, 3] = float(wp["proc_gripper"])
+            actions[i, 3] = float(wp["gripper"])
             # State: joint angles (unique config) + gripper
             agent_pos[i, :6] = wp["joint_pos"]
-            agent_pos[i, 6] = float(wp["proc_gripper"])
+            agent_pos[i, 6] = float(wp["gripper"])
 
             # Find nearest camera frame by timestamp
             ts_ms = int(wp["timestamp"] * 1000)
