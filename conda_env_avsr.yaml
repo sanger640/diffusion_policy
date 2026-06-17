@@ -1,0 +1,44 @@
+name: robodiff
+channels:
+  - conda-forge
+dependencies:
+  - python=3.9
+  - pip=22.2.2
+  - numpy=1.23.3
+  - numba=0.56.4
+  - scipy=1.9.1
+  - py-opencv=4.6.0
+  - cffi=1.15.1
+  - ipykernel=6.16
+  - matplotlib=3.6.1
+  - zarr=2.12.0
+  - numcodecs=0.10.2
+  - h5py=3.7.0
+  - hydra-core=1.2.0
+  - einops=0.4.1
+  - tqdm=4.64.1
+  - dill=0.3.5.1
+  - scikit-image=0.19.3
+  - wandb=0.13.3
+  - threadpoolctl=3.1.0
+  - shapely=1.8.4
+  - cython=0.29.32
+  - imageio=2.22.0
+  - imageio-ffmpeg=0.4.7
+  - termcolor=2.0.1
+  - tensorboard=2.10.1
+  - tensorboardx=2.5.1
+  - psutil=5.9.2
+  - click=8.0.4
+  - cmake=3.24.3
+  - huggingface_hub=0.23.0
+  - av=10.0.0
+  - diffusers=0.11.1
+  - datasets=2.6.1
+  # avoid cpu affinity issue: https://github.com/pytorch/pytorch/issues/99625
+  - llvm-openmp=14
+  - pip:
+    # PyTorch 2.7 with CUDA 12.8 — required for Blackwell (sm_120, RTX 5060 Ti / 5090)
+    - torch==2.7.0 --index-url https://download.pytorch.org/whl/cu128
+    - torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu128
+    - robomimic==0.2.0
