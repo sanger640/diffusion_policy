@@ -62,9 +62,9 @@ def _load_all_episodes(dataset_path: str) -> List[dict]:
     """Scan dataset_path/episodes/ and return a list of episode dicts.
 
     Each dict:
-      actions   : np.float32 (N, 4)  — target [x, y, z, gripper]
-      agent_pos : np.float32 (N, 4)  — actual [x, y, z, gripper]
-      img_paths : list[str]          — absolute path to wrist cam frame per step
+      actions   : np.float32 (N, 4)       — target [x, y, z, gripper]
+      agent_pos : np.float32 (N, 7)       — actual [joint_pos(6), gripper]
+      images    : np.float32 (N, 3, H, W) — wrist cam frames pre-loaded into RAM
     """
     root = Path(dataset_path).expanduser()
     ep_dirs = sorted(
@@ -95,7 +95,7 @@ def _load_all_episodes(dataset_path: str) -> List[dict]:
         N = len(waypoints)
         actions = np.zeros((N, 4), dtype=np.float32)   # proc_pos (3) + proc_gripper (1)
         agent_pos = np.zeros((N, 7), dtype=np.float32)  # joint_pos (6) + proc_gripper (1)
-        img_paths: List[str] = []
+        images = np.zeros((N, 3, _IMG_H, _IMG_W), dtype=np.float32)
 
         for i, wp in enumerate(waypoints):
             # Action: actual EE pos (FK) + commanded gripper state
@@ -105,13 +105,13 @@ def _load_all_episodes(dataset_path: str) -> List[dict]:
             agent_pos[i, :6] = wp["joint_pos"]
             agent_pos[i, 6] = float(wp["gripper"])
 
-            # Find nearest camera frame by timestamp
+            # Find nearest camera frame by timestamp and load into RAM
             ts_ms = int(wp["timestamp"] * 1000)
             closest_idx = int(np.argmin(np.abs(cam1_ts - ts_ms)))
-            img_paths.append(str(cam1_files[closest_idx]))
+            images[i] = _load_image(str(cam1_files[closest_idx]))
 
         episodes.append(
-            {"actions": actions, "agent_pos": agent_pos, "img_paths": img_paths}
+            {"actions": actions, "agent_pos": agent_pos, "images": images}
         )
 
     return episodes
@@ -158,10 +158,10 @@ class AvSRDataset(BaseImageDataset):
         self.pad_before = pad_before
         self.pad_after = pad_after
 
-        print(f"[AvSRDataset] Scanning {dataset_path} …")
+        print(f"[AvSRDataset] Scanning {dataset_path} and pre-loading images into RAM …")
         all_episodes = _load_all_episodes(dataset_path)
         n = len(all_episodes)
-        print(f"[AvSRDataset] Found {n} valid episodes.")
+        print(f"[AvSRDataset] Loaded {n} episodes into RAM.")
 
         # Reproducible train / val split
         rng = np.random.default_rng(seed)
@@ -208,7 +208,7 @@ class AvSRDataset(BaseImageDataset):
             t_c = max(0, min(t, N - 1))
             actions.append(ep["actions"][t_c])
             agent_pos.append(ep["agent_pos"][t_c])
-            images.append(_load_image(ep["img_paths"][t_c]))
+            images.append(ep["images"][t_c])
 
         data = {
             "obs": {
