@@ -16,26 +16,32 @@ Each trajectory JSON has the structure:
     "metadata": { ... },
     "waypoints": [
       {
-        "timestamp":    float,       # time.time() seconds
-        "position":     [x, y, z],  # target EE position
-        "orientation":  [x, y, z, w], # target EE quaternion
-        "gripper":      bool,        # target gripper state
-        "proc_pos":     [x, y, z],  # actual EE position
-        "proc_quat":    [x, y, z, w], # actual EE quaternion
-        "proc_gripper": bool,        # actual gripper state
-        "joint_pos":    [j1..j6]    # actual joint positions (rad)
+        "timestamp":    float,         # time.time() seconds
+        "position":     [x, y, z],     # target EE position (VR commanded)
+        "orientation":  [x, y, z, w],  # target EE quaternion (VR commanded)
+        "gripper":      bool,          # commanded gripper state  ← USE THIS
+        "proc_pos":     [x, y, z],     # actual EE position (FK from joint encoders)
+        "proc_quat":    [x, y, z, w],  # actual EE quaternion (FK from joint encoders)
+        "proc_gripper": bool,          # PREVIOUS step's actual gripper state — do not use
+        "joint_pos":    [j1..j6]       # actual joint positions (rad)
       }, ...
     ]
   }
 
-Action space  (4D): actual EE position proc_pos (3) + commanded gripper state (1 float).
-  Using proc_pos (FK from joint encoders) rather than the VR-commanded `position`
-  avoids injecting VR tracking noise into the action labels. Gripper uses the
-  commanded `gripper` field (not proc_gripper, which was not recorded correctly).
+Gripper field:  always use "gripper" (commanded current state), never "proc_gripper"
+                (proc_gripper lags by one step and was not reliably recorded).
 
-Agent_pos (7D): actual joint angles joint_pos (6) + commanded gripper state (1 float).
-  Joint angles uniquely determine arm configuration; EE position alone is ambiguous
-  (multiple joint configs can reach the same Cartesian pose).
+Action space:
+  Position-only (include_orientation=False, action_dim=4):
+    proc_pos (3) + gripper (1)
+  With orientation (include_orientation=True, action_dim=10):
+    proc_pos (3) + rot6d_from_proc_quat (6) + gripper (1)
+
+  proc_pos / proc_quat come from FK (joint encoder readback) rather than the
+  VR-commanded position/orientation to avoid injecting VR tracking noise into labels.
+
+Agent_pos (7D, always): joint_pos (6 rad) + gripper (1 float).
+  Joint angles uniquely determine arm configuration; EE position alone is ambiguous.
 
 Image: wrist camera resized to 240x320 (H x W), normalised to [0, 1]
 """
@@ -48,6 +54,7 @@ from typing import Dict, List, Optional
 import cv2
 import numpy as np
 import torch
+from scipy.spatial.transform import Rotation as R
 
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.dataset.base_dataset import BaseImageDataset
@@ -58,14 +65,26 @@ from diffusion_policy.common.normalize_util import get_image_range_normalizer
 _IMG_H, _IMG_W = 240, 320
 
 
-def _load_all_episodes(dataset_path: str) -> List[dict]:
+def _quat_to_rot6d(quats: np.ndarray) -> np.ndarray:
+    """Convert (N, 4) [x,y,z,w] quaternions → (N, 6) rot6d (first two columns of rotation matrix).
+
+    Rot6d is a continuous representation that avoids the antipodal symmetry of quaternions,
+    which improves diffusion policy training on orientation-controlled tasks.
+    """
+    matrices = R.from_quat(quats).as_matrix()   # (N, 3, 3)
+    return matrices[:, :, :2].reshape(-1, 6)     # first two columns, flattened
+
+
+def _load_all_episodes(dataset_path: str, include_orientation: bool = False) -> List[dict]:
     """Scan dataset_path/episodes/ and return a list of episode dicts.
 
     Each dict:
-      actions   : np.float32 (N, 4)       — target [x, y, z, gripper]
-      agent_pos : np.float32 (N, 7)       — actual [joint_pos(6), gripper]
-      images    : np.float32 (N, 3, H, W) — wrist cam frames pre-loaded into RAM
+      actions   : np.float32 (N, 4 or 10) — see module docstring
+      agent_pos : np.float32 (N, 7)        — joint_pos(6) + gripper(1)
+      images    : np.float32 (N, 3, H, W)  — wrist cam frames pre-loaded into RAM
     """
+    action_dim = 10 if include_orientation else 4
+
     root = Path(dataset_path).expanduser()
     ep_dirs = sorted(
         [d for d in (root / "episodes").iterdir() if d.is_dir()],
@@ -93,22 +112,32 @@ def _load_all_episodes(dataset_path: str) -> List[dict]:
         cam1_ts = np.array([int(p.stem.split("_")[1]) for p in cam1_files])
 
         N = len(waypoints)
-        actions = np.zeros((N, 4), dtype=np.float32)   # proc_pos (3) + proc_gripper (1)
-        agent_pos = np.zeros((N, 7), dtype=np.float32)  # joint_pos (6) + proc_gripper (1)
-        images = np.zeros((N, 3, _IMG_H, _IMG_W), dtype=np.float32)
+        actions   = np.zeros((N, action_dim), dtype=np.float32)
+        agent_pos = np.zeros((N, 7), dtype=np.float32)
+        images    = np.zeros((N, 3, _IMG_H, _IMG_W), dtype=np.float32)
+
+        proc_pos_all  = np.zeros((N, 3), dtype=np.float32)
+        proc_quat_all = np.zeros((N, 4), dtype=np.float32)
+        grip_all      = np.zeros((N, 1), dtype=np.float32)
 
         for i, wp in enumerate(waypoints):
-            # Action: actual EE pos (FK) + commanded gripper state
-            actions[i, :3] = wp["proc_pos"]
-            actions[i, 3] = float(wp["gripper"])
-            # State: joint angles (unique config) + gripper
+            proc_pos_all[i]  = wp["proc_pos"]
+            proc_quat_all[i] = wp["proc_quat"]   # [x, y, z, w]
+            grip_all[i, 0]   = float(wp["gripper"])   # commanded state — not proc_gripper
+
             agent_pos[i, :6] = wp["joint_pos"]
-            agent_pos[i, 6] = float(wp["gripper"])
+            agent_pos[i, 6]  = float(wp["gripper"])
 
             # Find nearest camera frame by timestamp and load into RAM
             ts_ms = int(wp["timestamp"] * 1000)
             closest_idx = int(np.argmin(np.abs(cam1_ts - ts_ms)))
             images[i] = _load_image(str(cam1_files[closest_idx]))
+
+        if include_orientation:
+            rot6d = _quat_to_rot6d(proc_quat_all)          # (N, 6)
+            actions = np.concatenate([proc_pos_all, rot6d, grip_all], axis=1)  # (N, 10)
+        else:
+            actions = np.concatenate([proc_pos_all, grip_all], axis=1)         # (N, 4)
 
         episodes.append(
             {"actions": actions, "agent_pos": agent_pos, "images": images}
@@ -135,10 +164,15 @@ class AvSRDataset(BaseImageDataset):
     With pad_before / pad_after, the first / last episode steps are repeated
     at the boundaries (identical to SequenceSampler boundary behaviour).
 
-    Each sample:
+    Each sample (include_orientation=False):
       obs/camera_0  : float32 (horizon, 3, H, W)
-      obs/agent_pos : float32 (horizon, 7)   joint_pos (6) + proc_gripper (1)
-      action        : float32 (horizon, 4)   proc_pos  (3) + proc_gripper (1)
+      obs/agent_pos : float32 (horizon, 7)    joint_pos(6) + gripper(1)
+      action        : float32 (horizon, 4)    proc_pos(3)  + gripper(1)
+
+    Each sample (include_orientation=True):
+      obs/camera_0  : float32 (horizon, 3, H, W)
+      obs/agent_pos : float32 (horizon, 7)    joint_pos(6) + gripper(1)
+      action        : float32 (horizon, 10)   proc_pos(3) + rot6d(6) + gripper(1)
     """
 
     def __init__(
@@ -150,6 +184,7 @@ class AvSRDataset(BaseImageDataset):
         seed: int = 42,
         val_ratio: float = 0.05,
         max_train_episodes: Optional[int] = None,
+        include_orientation: bool = False,
         shape_meta: Optional[dict] = None,
         **kwargs,
     ):
@@ -157,9 +192,11 @@ class AvSRDataset(BaseImageDataset):
         self.horizon = horizon
         self.pad_before = pad_before
         self.pad_after = pad_after
+        self.include_orientation = include_orientation
 
-        print(f"[AvSRDataset] Scanning {dataset_path} and pre-loading images into RAM …")
-        all_episodes = _load_all_episodes(dataset_path)
+        print(f"[AvSRDataset] Scanning {dataset_path} (pre-loading into RAM) …  "
+              f"orientation={'rot6d' if include_orientation else 'disabled'}")
+        all_episodes = _load_all_episodes(dataset_path, include_orientation=include_orientation)
         n = len(all_episodes)
         print(f"[AvSRDataset] Loaded {n} episodes into RAM.")
 
@@ -213,9 +250,9 @@ class AvSRDataset(BaseImageDataset):
         data = {
             "obs": {
                 "camera_0": np.stack(images),       # (T, 3, H, W)
-                "agent_pos": np.stack(agent_pos),   # (T, 4)
+                "agent_pos": np.stack(agent_pos),   # (T, 7)
             },
-            "action": np.stack(actions),            # (T, 4)
+            "action": np.stack(actions),            # (T, 4) or (T, 10)
         }
         return dict_apply(data, torch.from_numpy)
 
