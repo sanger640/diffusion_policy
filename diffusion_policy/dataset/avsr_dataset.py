@@ -71,8 +71,8 @@ def _quat_to_rot6d(quats: np.ndarray) -> np.ndarray:
     Rot6d is a continuous representation that avoids the antipodal symmetry of quaternions,
     which improves diffusion policy training on orientation-controlled tasks.
     """
-    matrices = R.from_quat(quats).as_matrix()   # (N, 3, 3)
-    return matrices[:, :, :2].reshape(-1, 6)     # first two columns, flattened
+    matrices = R.from_quat(quats).as_matrix()                                   # (N, 3, 3)
+    return np.concatenate([matrices[:, :, 0], matrices[:, :, 1]], axis=1)       # (N, 6)
 
 
 def _load_all_episodes(dataset_path: str, include_orientation: bool = False) -> List[dict]:
