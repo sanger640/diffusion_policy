@@ -75,15 +75,26 @@ def _quat_to_rot6d(quats: np.ndarray) -> np.ndarray:
     return np.concatenate([matrices[:, :, 0], matrices[:, :, 1]], axis=1)       # (N, 6)
 
 
-def _load_all_episodes(dataset_path: str, include_orientation: bool = False) -> List[dict]:
+def _load_all_episodes(dataset_path: str, include_orientation: bool = False,
+                       action_mode: str = 'ee') -> List[dict]:
     """Scan dataset_path/episodes/ and return a list of episode dicts.
 
     Each dict:
-      actions   : np.float32 (N, 4 or 10) — see module docstring
-      agent_pos : np.float32 (N, 7)        — joint_pos(6) + gripper(1)
-      images    : np.float32 (N, 3, H, W)  — wrist cam frames pre-loaded into RAM
+      actions   : np.float32 (N, 4 or 7 or 10) — see module docstring
+      agent_pos : np.float32 (N, 7)              — joint_pos(6) + gripper(1)
+      images    : np.float32 (N, 3, H, W)        — wrist cam frames pre-loaded into RAM
+
+    action_mode:
+      'ee'     — proc_pos(3) + gripper(1) = 4D
+      'ee_ori' — proc_pos(3) + rot6d(6) + gripper(1) = 10D  (same as include_orientation=True)
+      'joints' — joint_pos(6) + gripper(1) = 7D
     """
-    action_dim = 10 if include_orientation else 4
+    if action_mode == 'joints':
+        action_dim = 7
+    elif action_mode == 'ee_ori' or include_orientation:
+        action_dim = 10
+    else:
+        action_dim = 4
 
     root = Path(dataset_path).expanduser()
     ep_dirs = sorted(
@@ -133,7 +144,10 @@ def _load_all_episodes(dataset_path: str, include_orientation: bool = False) -> 
             closest_idx = int(np.argmin(np.abs(cam1_ts - ts_ms)))
             images[i] = _load_image(str(cam1_files[closest_idx]))
 
-        if include_orientation:
+        if action_mode == 'joints':
+            joint_all = agent_pos[:, :6]                    # (N, 6) — already filled above
+            actions = np.concatenate([joint_all, grip_all], axis=1)            # (N, 7)
+        elif action_mode == 'ee_ori' or include_orientation:
             rot6d = _quat_to_rot6d(proc_quat_all)          # (N, 6)
             actions = np.concatenate([proc_pos_all, rot6d, grip_all], axis=1)  # (N, 10)
         else:
@@ -185,6 +199,7 @@ class AvSRDataset(BaseImageDataset):
         val_ratio: float = 0.05,
         max_train_episodes: Optional[int] = None,
         include_orientation: bool = False,
+        action_mode: str = 'ee',
         shape_meta: Optional[dict] = None,
         **kwargs,
     ):
@@ -193,10 +208,14 @@ class AvSRDataset(BaseImageDataset):
         self.pad_before = pad_before
         self.pad_after = pad_after
         self.include_orientation = include_orientation
+        self.action_mode = action_mode
 
+        mode_str = action_mode if action_mode != 'ee' else ('ee_ori' if include_orientation else 'ee')
         print(f"[AvSRDataset] Scanning {dataset_path} (pre-loading into RAM) …  "
-              f"orientation={'rot6d' if include_orientation else 'disabled'}")
-        all_episodes = _load_all_episodes(dataset_path, include_orientation=include_orientation)
+              f"action_mode={mode_str}")
+        all_episodes = _load_all_episodes(dataset_path,
+                                          include_orientation=include_orientation,
+                                          action_mode=action_mode)
         n = len(all_episodes)
         print(f"[AvSRDataset] Loaded {n} episodes into RAM.")
 
