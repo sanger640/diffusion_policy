@@ -54,6 +54,7 @@ from typing import Dict, List, Optional
 import cv2
 import numpy as np
 import torch
+from scipy.signal import savgol_filter
 from scipy.spatial.transform import Rotation as R
 
 from diffusion_policy.common.pytorch_util import dict_apply
@@ -63,6 +64,57 @@ from diffusion_policy.common.normalize_util import get_image_range_normalizer
 
 # Target image size expected by MultiImageObsEncoder (H, W)
 _IMG_H, _IMG_W = 240, 320
+
+
+def _resample_waypoints(waypoints: list, hz: float = 10.0) -> list:
+    """Resample variable-rate waypoints to a fixed rate via linear interpolation.
+
+    Eliminates timing gaps from VR teleop (observed max gap: 749ms vs target 100ms).
+    Gripper uses nearest-neighbour to preserve binary transitions.
+    Quaternions are linearly interpolated per-component then renormalised.
+    """
+    if len(waypoints) < 2:
+        return waypoints
+    ts = np.array([w["timestamp"] for w in waypoints])
+    t_new = np.arange(ts[0], ts[-1], 1.0 / hz)
+    if len(t_new) < 4:
+        return waypoints
+
+    joints_raw   = np.array([w["joint_pos"]  for w in waypoints])   # (N, 6)
+    proc_pos_raw = np.array([w["proc_pos"]   for w in waypoints])   # (N, 3)
+    proc_quat_raw= np.array([w["proc_quat"]  for w in waypoints])   # (N, 4)
+    grip_raw     = np.array([float(w["gripper"]) for w in waypoints])
+
+    joints_new   = np.stack([np.interp(t_new, ts, joints_raw[:, j])   for j in range(6)], axis=1)
+    proc_pos_new = np.stack([np.interp(t_new, ts, proc_pos_raw[:, k]) for k in range(3)], axis=1)
+    proc_quat_new= np.stack([np.interp(t_new, ts, proc_quat_raw[:, k])for k in range(4)], axis=1)
+    proc_quat_new /= np.maximum(np.linalg.norm(proc_quat_new, axis=1, keepdims=True), 1e-6)
+
+    # nearest-neighbour for gripper to keep binary transitions sharp
+    grip_idx = np.argmin(np.abs(t_new[:, None] - ts[None, :]), axis=1)
+    grip_new = grip_raw[grip_idx] > 0.5
+
+    return [
+        {
+            "timestamp": float(t_new[i]),
+            "joint_pos": joints_new[i].tolist(),
+            "proc_pos":  proc_pos_new[i].tolist(),
+            "proc_quat": proc_quat_new[i].tolist(),
+            "gripper":   bool(grip_new[i]),
+        }
+        for i in range(len(t_new))
+    ]
+
+
+def _smooth_array(arr: np.ndarray, window: int = 7, poly: int = 2) -> np.ndarray:
+    """Apply Savitzky-Golay smoothing per column. Reduces VR controller jitter
+    (~20% direction-reversal rate) without distorting the underlying motion."""
+    wl = min(window, (len(arr) // 2) * 2 - 1)
+    wl = max(wl, poly + 2)
+    if len(arr) < wl:
+        return arr
+    return np.stack([savgol_filter(arr[:, j], wl, poly)
+                     for j in range(arr.shape[1])], axis=1)
 
 
 def _quat_to_rot6d(quats: np.ndarray) -> np.ndarray:
@@ -76,7 +128,9 @@ def _quat_to_rot6d(quats: np.ndarray) -> np.ndarray:
 
 
 def _load_all_episodes(dataset_path: str, include_orientation: bool = False,
-                       action_mode: str = 'ee') -> List[dict]:
+                       action_mode: str = 'ee',
+                       resample_hz: float = 10.0,
+                       smooth_window: int = 7) -> List[dict]:
     """Scan dataset_path/episodes/ and return a list of episode dicts.
 
     Each dict:
@@ -88,6 +142,16 @@ def _load_all_episodes(dataset_path: str, include_orientation: bool = False,
       'ee'     — proc_pos(3) + gripper(1) = 4D
       'ee_ori' — proc_pos(3) + rot6d(6) + gripper(1) = 10D  (same as include_orientation=True)
       'joints' — joint_pos(6) + gripper(1) = 7D
+
+    resample_hz:
+      Resample waypoints to this fixed rate before building arrays.
+      Eliminates timing gaps (observed max 749ms vs target 100ms in fine_pick_v2).
+      Set to 0 to disable.
+
+    smooth_window:
+      Savitzky-Golay window length for joint/EE position smoothing.
+      Reduces VR controller jitter (~20% direction-reversal rate).
+      Set to 0 to disable.
     """
     if action_mode == 'joints':
         action_dim = 7
@@ -111,6 +175,23 @@ def _load_all_episodes(dataset_path: str, include_orientation: bool = False,
         with open(traj_files[-1]) as f:
             traj = json.load(f)
         waypoints = traj.get("waypoints", [])
+        if not waypoints:
+            continue
+
+        # ── Filter: drop episodes too corrupted for reliable interpolation ────
+        # Filtering alone can't fix the dataset (96% of episodes have some gap),
+        # but episodes with extreme gaps or high gap density are unfixable by
+        # resampling — linear interpolation over 500ms+ fabricates unknown motion.
+        if len(waypoints) >= 2 and resample_hz > 0:
+            _dts = np.diff([w["timestamp"] for w in waypoints])
+            _max_gap   = float(_dts.max())
+            _gap_frac  = float(np.sum(_dts > 0.20) / len(_dts))
+            if _max_gap > 0.50 or _gap_frac > 0.03:
+                continue
+
+        # ── Fix 1: resample to fixed rate (removes timing gaps) ───────────────
+        if resample_hz > 0:
+            waypoints = _resample_waypoints(waypoints, hz=resample_hz)
         if not waypoints:
             continue
 
@@ -144,8 +225,14 @@ def _load_all_episodes(dataset_path: str, include_orientation: bool = False,
             closest_idx = int(np.argmin(np.abs(cam1_ts - ts_ms)))
             images[i] = _load_image(str(cam1_files[closest_idx]))
 
+        # ── Fix 2: smooth joint/EE positions (reduces direction reversals) ────
+        if smooth_window > 0:
+            agent_pos[:, :6] = _smooth_array(agent_pos[:, :6], window=smooth_window)
+            if action_mode in ('ee', 'ee_ori') or include_orientation:
+                proc_pos_all = _smooth_array(proc_pos_all, window=smooth_window)
+
         if action_mode == 'joints':
-            joint_all = agent_pos[:, :6]                    # (N, 6) — already filled above
+            joint_all = agent_pos[:, :6]
             actions = np.concatenate([joint_all, grip_all], axis=1)            # (N, 7)
         elif action_mode == 'ee_ori' or include_orientation:
             rot6d = _quat_to_rot6d(proc_quat_all)          # (N, 6)
@@ -200,6 +287,8 @@ class AvSRDataset(BaseImageDataset):
         max_train_episodes: Optional[int] = None,
         include_orientation: bool = False,
         action_mode: str = 'ee',
+        resample_hz: float = 10.0,
+        smooth_window: int = 7,
         shape_meta: Optional[dict] = None,
         **kwargs,
     ):
@@ -212,10 +301,12 @@ class AvSRDataset(BaseImageDataset):
 
         mode_str = action_mode if action_mode != 'ee' else ('ee_ori' if include_orientation else 'ee')
         print(f"[AvSRDataset] Scanning {dataset_path} (pre-loading into RAM) …  "
-              f"action_mode={mode_str}")
+              f"action_mode={mode_str}  resample_hz={resample_hz}  smooth_window={smooth_window}")
         all_episodes = _load_all_episodes(dataset_path,
                                           include_orientation=include_orientation,
-                                          action_mode=action_mode)
+                                          action_mode=action_mode,
+                                          resample_hz=resample_hz,
+                                          smooth_window=smooth_window)
         n = len(all_episodes)
         print(f"[AvSRDataset] Loaded {n} episodes into RAM.")
 
