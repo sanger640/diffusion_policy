@@ -23,7 +23,8 @@ Each trajectory JSON has the structure:
         "proc_pos":     [x, y, z],     # actual EE position (FK from joint encoders)
         "proc_quat":    [x, y, z, w],  # actual EE quaternion (FK from joint encoders)
         "proc_gripper": bool,          # PREVIOUS step's actual gripper state — do not use
-        "joint_pos":    [j1..j6]       # actual joint positions (rad)
+        "joint_pos":    [j1..j6],      # actual joint positions (rad)
+        "ee_twist":     [vx,vy,vz,wx,wy,wz]  # actual EE spatial velocity (optional; zeros if not recorded)
       }, ...
     ]
   }
@@ -32,15 +33,21 @@ Gripper field:  always use "gripper" (commanded current state), never "proc_grip
                 (proc_gripper lags by one step and was not reliably recorded).
 
 Action space:
-  Position-only (include_orientation=False, action_dim=4):
+  Position-only (action_mode='ee', action_dim=4):
     proc_pos (3) + gripper (1)
-  With orientation (include_orientation=True, action_dim=10):
+  With rot6d orientation (action_mode='ee_ori' / include_orientation=True, action_dim=10):
     proc_pos (3) + rot6d_from_proc_quat (6) + gripper (1)
+  With raw quaternion orientation (action_mode='ee_quat', action_dim=8):
+    proc_pos (3) + proc_quat (4) + gripper (1)
+  Joint-space (action_mode='joints', action_dim=7):
+    joint_pos (6) + gripper (1)
 
   proc_pos / proc_quat come from FK (joint encoder readback) rather than the
-  VR-commanded position/orientation to avoid injecting VR tracking noise into labels.
+  spacemouse-commanded position/orientation to avoid injecting controller/VR
+  tracking noise into labels.
 
-Agent_pos (7D, always): joint_pos (6 rad) + gripper (1 float).
+Agent_pos: joint_pos (6 rad) + gripper (1 float) = 7D by default.
+  With include_velocity=True, ee_twist (6D: vx,vy,vz,wx,wy,wz) is appended → 13D.
   Joint angles uniquely determine arm configuration; EE position alone is ambiguous.
 
 Image: wrist camera resized to 240x320 (H x W), normalised to [0, 1]
@@ -83,12 +90,14 @@ def _resample_waypoints(waypoints: list, hz: float = 10.0) -> list:
     joints_raw   = np.array([w["joint_pos"]  for w in waypoints])   # (N, 6)
     proc_pos_raw = np.array([w["proc_pos"]   for w in waypoints])   # (N, 3)
     proc_quat_raw= np.array([w["proc_quat"]  for w in waypoints])   # (N, 4)
+    twist_raw    = np.array([w.get("ee_twist", [0.0] * 6) for w in waypoints])  # (N, 6)
     grip_raw     = np.array([float(w["gripper"]) for w in waypoints])
 
     joints_new   = np.stack([np.interp(t_new, ts, joints_raw[:, j])   for j in range(6)], axis=1)
     proc_pos_new = np.stack([np.interp(t_new, ts, proc_pos_raw[:, k]) for k in range(3)], axis=1)
     proc_quat_new= np.stack([np.interp(t_new, ts, proc_quat_raw[:, k])for k in range(4)], axis=1)
     proc_quat_new /= np.maximum(np.linalg.norm(proc_quat_new, axis=1, keepdims=True), 1e-6)
+    twist_new    = np.stack([np.interp(t_new, ts, twist_raw[:, k])    for k in range(6)], axis=1)
 
     # nearest-neighbour for gripper to keep binary transitions sharp
     grip_idx = np.argmin(np.abs(t_new[:, None] - ts[None, :]), axis=1)
@@ -100,6 +109,7 @@ def _resample_waypoints(waypoints: list, hz: float = 10.0) -> list:
             "joint_pos": joints_new[i].tolist(),
             "proc_pos":  proc_pos_new[i].tolist(),
             "proc_quat": proc_quat_new[i].tolist(),
+            "ee_twist":  twist_new[i].tolist(),
             "gripper":   bool(grip_new[i]),
         }
         for i in range(len(t_new))
@@ -130,18 +140,23 @@ def _quat_to_rot6d(quats: np.ndarray) -> np.ndarray:
 def _load_all_episodes(dataset_path: str, include_orientation: bool = False,
                        action_mode: str = 'ee',
                        resample_hz: float = 10.0,
-                       smooth_window: int = 7) -> List[dict]:
+                       smooth_window: int = 7,
+                       include_velocity: bool = False) -> List[dict]:
     """Scan dataset_path/episodes/ and return a list of episode dicts.
 
     Each dict:
-      actions   : np.float32 (N, 4 or 7 or 10) — see module docstring
-      agent_pos : np.float32 (N, 7)              — joint_pos(6) + gripper(1)
-      images    : np.float32 (N, 3, H, W)        — wrist cam frames pre-loaded into RAM
+      actions   : np.float32 (N, 4, 7, 8 or 10) — see module docstring
+      agent_pos : np.float32 (N, 7 or 13)         — joint_pos(6) + gripper(1) [+ ee_twist(6)]
+      images    : np.float32 (N, 3, H, W)         — wrist cam frames pre-loaded into RAM
 
     action_mode:
-      'ee'     — proc_pos(3) + gripper(1) = 4D
-      'ee_ori' — proc_pos(3) + rot6d(6) + gripper(1) = 10D  (same as include_orientation=True)
-      'joints' — joint_pos(6) + gripper(1) = 7D
+      'ee'      — proc_pos(3) + gripper(1) = 4D
+      'ee_ori'  — proc_pos(3) + rot6d(6) + gripper(1) = 10D  (same as include_orientation=True)
+      'ee_quat' — proc_pos(3) + proc_quat(4) + gripper(1) = 8D
+      'joints'  — joint_pos(6) + gripper(1) = 7D
+
+    include_velocity:
+      If True, append ee_twist (6D: vx,vy,vz,wx,wy,wz) to agent_pos, giving 13D instead of 7D.
 
     resample_hz:
       Resample waypoints to this fixed rate before building arrays.
@@ -157,8 +172,12 @@ def _load_all_episodes(dataset_path: str, include_orientation: bool = False,
         action_dim = 7
     elif action_mode == 'ee_ori' or include_orientation:
         action_dim = 10
+    elif action_mode == 'ee_quat':
+        action_dim = 8
     else:
         action_dim = 4
+
+    agent_pos_dim = 13 if include_velocity else 7
 
     root = Path(dataset_path).expanduser()
     ep_dirs = sorted(
@@ -205,7 +224,7 @@ def _load_all_episodes(dataset_path: str, include_orientation: bool = False,
 
         N = len(waypoints)
         actions   = np.zeros((N, action_dim), dtype=np.float32)
-        agent_pos = np.zeros((N, 7), dtype=np.float32)
+        agent_pos = np.zeros((N, agent_pos_dim), dtype=np.float32)
         images    = np.zeros((N, 3, _IMG_H, _IMG_W), dtype=np.float32)
 
         proc_pos_all  = np.zeros((N, 3), dtype=np.float32)
@@ -219,6 +238,8 @@ def _load_all_episodes(dataset_path: str, include_orientation: bool = False,
 
             agent_pos[i, :6] = wp["joint_pos"]
             agent_pos[i, 6]  = float(wp["gripper"])
+            if include_velocity:
+                agent_pos[i, 7:13] = wp.get("ee_twist", [0.0] * 6)
 
             # Find nearest camera frame by timestamp and load into RAM
             ts_ms = int(wp["timestamp"] * 1000)
@@ -228,7 +249,7 @@ def _load_all_episodes(dataset_path: str, include_orientation: bool = False,
         # ── Fix 2: smooth joint/EE positions (reduces direction reversals) ────
         if smooth_window > 0:
             agent_pos[:, :6] = _smooth_array(agent_pos[:, :6], window=smooth_window)
-            if action_mode in ('ee', 'ee_ori') or include_orientation:
+            if action_mode in ('ee', 'ee_ori', 'ee_quat') or include_orientation:
                 proc_pos_all = _smooth_array(proc_pos_all, window=smooth_window)
 
         if action_mode == 'joints':
@@ -237,6 +258,8 @@ def _load_all_episodes(dataset_path: str, include_orientation: bool = False,
         elif action_mode == 'ee_ori' or include_orientation:
             rot6d = _quat_to_rot6d(proc_quat_all)          # (N, 6)
             actions = np.concatenate([proc_pos_all, rot6d, grip_all], axis=1)  # (N, 10)
+        elif action_mode == 'ee_quat':
+            actions = np.concatenate([proc_pos_all, proc_quat_all, grip_all], axis=1)  # (N, 8)
         else:
             actions = np.concatenate([proc_pos_all, grip_all], axis=1)         # (N, 4)
 
@@ -265,15 +288,22 @@ class AvSRDataset(BaseImageDataset):
     With pad_before / pad_after, the first / last episode steps are repeated
     at the boundaries (identical to SequenceSampler boundary behaviour).
 
-    Each sample (include_orientation=False):
+    Each sample (action_mode='ee'):
       obs/camera_0  : float32 (horizon, 3, H, W)
-      obs/agent_pos : float32 (horizon, 7)    joint_pos(6) + gripper(1)
-      action        : float32 (horizon, 4)    proc_pos(3)  + gripper(1)
+      obs/agent_pos : float32 (horizon, 7 or 13)   joint_pos(6) + gripper(1) [+ ee_twist(6)]
+      action        : float32 (horizon, 4)         proc_pos(3)  + gripper(1)
 
-    Each sample (include_orientation=True):
+    Each sample (action_mode='ee_ori' / include_orientation=True):
       obs/camera_0  : float32 (horizon, 3, H, W)
-      obs/agent_pos : float32 (horizon, 7)    joint_pos(6) + gripper(1)
-      action        : float32 (horizon, 10)   proc_pos(3) + rot6d(6) + gripper(1)
+      obs/agent_pos : float32 (horizon, 7 or 13)   joint_pos(6) + gripper(1) [+ ee_twist(6)]
+      action        : float32 (horizon, 10)        proc_pos(3) + rot6d(6) + gripper(1)
+
+    Each sample (action_mode='ee_quat'):
+      obs/camera_0  : float32 (horizon, 3, H, W)
+      obs/agent_pos : float32 (horizon, 7 or 13)   joint_pos(6) + gripper(1) [+ ee_twist(6)]
+      action        : float32 (horizon, 8)         proc_pos(3) + proc_quat(4) + gripper(1)
+
+    include_velocity=True appends ee_twist (6D) to agent_pos, giving 13D instead of 7D.
     """
 
     def __init__(
@@ -289,6 +319,7 @@ class AvSRDataset(BaseImageDataset):
         action_mode: str = 'ee',
         resample_hz: float = 10.0,
         smooth_window: int = 7,
+        include_velocity: bool = False,
         shape_meta: Optional[dict] = None,
         **kwargs,
     ):
@@ -298,15 +329,18 @@ class AvSRDataset(BaseImageDataset):
         self.pad_after = pad_after
         self.include_orientation = include_orientation
         self.action_mode = action_mode
+        self.include_velocity = include_velocity
 
         mode_str = action_mode if action_mode != 'ee' else ('ee_ori' if include_orientation else 'ee')
         print(f"[AvSRDataset] Scanning {dataset_path} (pre-loading into RAM) …  "
-              f"action_mode={mode_str}  resample_hz={resample_hz}  smooth_window={smooth_window}")
+              f"action_mode={mode_str}  resample_hz={resample_hz}  smooth_window={smooth_window}  "
+              f"include_velocity={include_velocity}")
         all_episodes = _load_all_episodes(dataset_path,
                                           include_orientation=include_orientation,
                                           action_mode=action_mode,
                                           resample_hz=resample_hz,
-                                          smooth_window=smooth_window)
+                                          smooth_window=smooth_window,
+                                          include_velocity=include_velocity)
         n = len(all_episodes)
         print(f"[AvSRDataset] Loaded {n} episodes into RAM.")
 
@@ -360,9 +394,9 @@ class AvSRDataset(BaseImageDataset):
         data = {
             "obs": {
                 "camera_0": np.stack(images),       # (T, 3, H, W)
-                "agent_pos": np.stack(agent_pos),   # (T, 7)
+                "agent_pos": np.stack(agent_pos),   # (T, 7) or (T, 13)
             },
-            "action": np.stack(actions),            # (T, 4) or (T, 10)
+            "action": np.stack(actions),            # (T, 4), (T, 7), (T, 8) or (T, 10)
         }
         return dict_apply(data, torch.from_numpy)
 
