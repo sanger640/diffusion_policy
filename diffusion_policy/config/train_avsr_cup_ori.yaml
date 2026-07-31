@@ -43,7 +43,7 @@ policy:
     rgb_model:
       _target_: diffusion_policy.model.vision.model_getter.get_resnet
       name: resnet18
-      weights: null
+      weights: r3m   # egocentric-manipulation-pretrained ResNet18 (requires `pip install r3m`)
     # Images saved at D435 native res; resize to 240x320 before cropping.
     resize_shape: [240, 320]
     crop_shape: [216, 288]   # 90% crop (H x W)

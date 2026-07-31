@@ -66,7 +66,7 @@ from scipy.spatial.transform import Rotation as R
 
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.dataset.base_dataset import BaseImageDataset
-from diffusion_policy.model.common.normalizer import LinearNormalizer
+from diffusion_policy.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 from diffusion_policy.common.normalize_util import get_image_range_normalizer
 
 # Target image size expected by MultiImageObsEncoder (H, W)
@@ -414,11 +414,60 @@ class AvSRDataset(BaseImageDataset):
         all_actions = np.concatenate([e["actions"] for e in ep_list], axis=0)
         all_pos = np.concatenate([e["agent_pos"] for e in ep_list], axis=0)
 
-        normalizer.fit(
-            data={"action": all_actions, "agent_pos": all_pos},
-            last_n_dims=1,
-            mode=mode,
-            **kwargs,
-        )
+        normalizer["agent_pos"] = SingleFieldLinearNormalizer.create_fit(
+            all_pos, last_n_dims=1, mode=mode, **kwargs)
+        normalizer["action"] = self._fit_action_normalizer(all_actions, mode=mode, **kwargs)
         normalizer["camera_0"] = get_image_range_normalizer()
         return normalizer
+
+    def _fit_action_normalizer(self, all_actions: np.ndarray, mode: str = "limits",
+                                **kwargs) -> SingleFieldLinearNormalizer:
+        """Rotation dims (rot6d or raw quaternion) are left identity-normalized
+        (scale=1, offset=0) instead of independently min/max-scaled per component.
+
+        Per-dimension min/max scaling is fine for position and gripper (each is an
+        independent, unconstrained scalar), but rotation representations encode a
+        constrained manifold (unit quaternion / orthonormal rot6d columns) — scaling
+        each component by its own observed range breaks the isometry between
+        normalized-space distance and true rotational distance, which the diffusion
+        loss then optimizes against. This mirrors diffusion_policy's own
+        robomimic_abs_action_only_normalizer_from_stat (normalize_util.py), which
+        applies identity scale/offset to the rotation block of real/sim absolute
+        end-effector actions and only min/max-fits position.
+        """
+        mode_str = self.action_mode if self.action_mode != 'ee' else (
+            'ee_ori' if self.include_orientation else 'ee')
+        rot_slice = {'ee_ori': slice(3, 9), 'ee_quat': slice(3, 7)}.get(mode_str)
+
+        if rot_slice is None:
+            return SingleFieldLinearNormalizer.create_fit(
+                all_actions, last_n_dims=1, mode=mode, **kwargs)
+
+        D = all_actions.shape[-1]
+        flat = all_actions.reshape(-1, D).astype(np.float32)
+        other_idx = np.array(
+            [i for i in range(D) if not (rot_slice.start <= i < rot_slice.stop)])
+
+        other_normalizer = SingleFieldLinearNormalizer.create_fit(
+            flat[:, other_idx], last_n_dims=1, mode=mode, **kwargs)
+        other_p = other_normalizer.params_dict
+        rot = flat[:, rot_slice]
+
+        scale = np.zeros(D, dtype=np.float32)
+        offset = np.zeros(D, dtype=np.float32)
+        stats = {k: np.zeros(D, dtype=np.float32) for k in ('min', 'max', 'mean', 'std')}
+
+        scale[other_idx] = other_p['scale'].detach().cpu().numpy()
+        offset[other_idx] = other_p['offset'].detach().cpu().numpy()
+        for k in stats:
+            stats[k][other_idx] = other_p['input_stats'][k].detach().cpu().numpy()
+
+        scale[rot_slice] = 1.0
+        offset[rot_slice] = 0.0
+        stats['min'][rot_slice] = rot.min(axis=0)
+        stats['max'][rot_slice] = rot.max(axis=0)
+        stats['mean'][rot_slice] = rot.mean(axis=0)
+        stats['std'][rot_slice] = rot.std(axis=0)
+
+        return SingleFieldLinearNormalizer.create_manual(
+            scale=scale, offset=offset, input_stats_dict=stats)

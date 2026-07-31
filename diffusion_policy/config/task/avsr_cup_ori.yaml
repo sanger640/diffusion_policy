@@ -4,6 +4,14 @@ name: avsr_cup_ori
 # Action space: proc_pos (3) + rot6d_from_proc_quat (6) + gripper (1) = 10D
 # Rot6d is the first two columns of the rotation matrix — continuous, no antipodal ambiguity.
 # Agent pos: joint_pos (6 rad) + gripper (1) = 7D (unchanged from avsr_cup)
+#
+# Normalization: AvSRDataset.get_normalizer() identity-normalizes the rot6d block
+# (dims 3:9) instead of independently min/max-scaling each of its 6 components —
+# per-dim min/max scaling distorts the rotation manifold's geometry (breaks the
+# isometry between normalized-space distance and true rotational distance), which
+# the diffusion loss then optimizes against. Position and gripper still get real
+# min/max fitting. Mirrors diffusion_policy's own
+# robomimic_abs_action_only_normalizer_from_stat (common/normalize_util.py).
 image_shape: [3, 240, 320]   # C x H x W
 action_dim: 10                # proc_pos(3) + rot6d(6) + gripper(1)
 agent_pos_dim: 7              # joint_pos(6) + gripper(1)
@@ -38,6 +46,8 @@ dataset:
   dataset_path: ${task.dataset_path}
   shape_meta: *shape_meta
   include_orientation: True
+  smooth_window: 0   # disable Savitzky-Golay smoothing — was blurring the fine
+                      # corrective contact motions needed for bushing insertion
 
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps}-1'}
