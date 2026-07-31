@@ -1,0 +1,61 @@
+name: avsr_cup_quat_no_vel
+
+# --- Observation / Action Shapes ---
+# Action space: proc_pos (3) + proc_quat (4) + gripper (1) = 8D (raw quaternion, not rot6d)
+# Agent pos: joint_pos (6 rad) + gripper (1) = 7D — NO ee_twist.
+#
+# Why no velocity: during a real deploy run, agent_pos's ee_twist dims silently read
+# zero whenever joint_velocity_estimator.launch wasn't running — a real train/deploy
+# state-distribution mismatch (training data's ee_twist was ~always non-zero; deploy
+# fed it a frozen, out-of-distribution zero). That's a live suspect for why the
+# deployed model's raw orientation predictions trended backwards relative to every
+# demo while position roughly tracked — if the model leaned on velocity context more
+# for judging rotational intent (rotation changes are subtler/slower in the demos than
+# translation) than for position, an OOD zero-velocity input could push the orientation
+# head into a different, confidently-wrong regime while leaving position less affected.
+# This config removes the feature entirely so there's no such mismatch to worry about.
+image_shape: [3, 240, 320]   # C x H x W
+action_dim: 8                 # proc_pos(3) + proc_quat(4) + gripper(1)
+agent_pos_dim: 7              # joint_pos(6) + gripper(1)
+
+# Path to the root avsr_teleop save directory (contains episodes/).
+# Override via Hydra: task.dataset_path=/path/to/teleop_data
+dataset_path: "${hydra:runtime.cwd}/data/avsr_teleop_data"
+
+shape_meta: &shape_meta
+  obs:
+    camera_0:                 # wrist camera (cam1)
+      shape: ${task.image_shape}
+      type: rgb
+    agent_pos:                # joint_pos(6) + gripper(1)
+      shape:
+        - ${task.agent_pos_dim}
+      type: low_dim
+  action:
+    shape:
+      - ${task.action_dim}    # proc_pos(3) + proc_quat(4) + gripper(1)
+
+# --- Environment Runner ---
+# No simulation; DummyRunner satisfies the API without connecting to hardware.
+env_runner:
+  _target_: diffusion_policy.env_runner.dummy_runner.DummyRunner
+  n_train: 0
+  n_test: 0
+
+# --- Dataset ---
+dataset:
+  _target_: diffusion_policy.dataset.avsr_dataset.AvSRDataset
+  dataset_path: ${task.dataset_path}
+  shape_meta: *shape_meta
+  action_mode: ee_quat
+  include_velocity: False
+  smooth_window: 0   # disable Savitzky-Golay smoothing — was blurring the fine
+                      # corrective contact motions needed for bushing insertion
+
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+
+  seed: 42
+  val_ratio: 0.05
+  max_train_episodes: null
