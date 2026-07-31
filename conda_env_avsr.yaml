@@ -42,3 +42,4 @@ dependencies:
     - torch==2.7.0 --index-url https://download.pytorch.org/whl/cu128
     - torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu128
     - robomimic==0.2.0
+    - git+https://github.com/facebookresearch/r3m.git   # egocentric-manipulation-pretrained ResNet (avsr_cup_quat obs_encoder)

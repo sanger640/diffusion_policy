@@ -38,6 +38,8 @@ dataset:
   shape_meta: *shape_meta
   action_mode: ee_quat
   include_velocity: True
+  smooth_window: 0   # disable Savitzky-Golay smoothing — was blurring the fine
+                      # corrective contact motions needed for bushing insertion
 
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps}-1'}
